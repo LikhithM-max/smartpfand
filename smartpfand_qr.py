@@ -1,113 +1,75 @@
-import streamlit as st
+import gradio as gr
+import cv2
 import sqlite3
 from datetime import datetime
-import cv2
-from pyzbar.pyzbar import decode
+import numpy as np
 
-DB_NAME = "pfand.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    st.write("Initializing database…")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS bottle_returns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bottle_id TEXT UNIQUE,
-            timestamp TEXT,
-            amount INTEGER DEFAULT 10
-        )
-    """)
+# --- DB Functions ---
+def create_db():
+    conn = sqlite3.connect("vimoksha.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS returns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT UNIQUE,
+        timestamp TEXT,
+        amount INTEGER
+    )''')
     conn.commit()
     conn.close()
 
-def add_bottle(bottle_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
+def add_return(code, amount=10):
+    conn = sqlite3.connect("vimoksha.db")
+    c = conn.cursor()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        cur.execute("INSERT INTO bottle_returns (bottle_id, timestamp) VALUES (?, ?)",
-                    (bottle_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        c.execute('INSERT INTO returns (code, timestamp, amount) VALUES (?, ?, ?)', (code, timestamp, amount))
         conn.commit()
-        return True
+        result = f"✅ QR Code: {code}\nTime: {timestamp}\nReward: ₹{amount}"
     except sqlite3.IntegrityError:
-        return False
-    finally:
-        conn.close()
-
-def return_bottle(bottle_id):
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM bottle_returns WHERE bottle_id = ?", (bottle_id,))
-    row = cur.fetchone()
-    if row:
-        cur.execute("DELETE FROM bottle_returns WHERE bottle_id = ?", (bottle_id,))
-        conn.commit()
-        conn.close()
-        return {"bottle_id": bottle_id, "timestamp": row[2], "amount": "₹10"}
+        result = f"⚠️ QR Code {code} already used!"
     conn.close()
-    return None
+    return result
 
-def get_all_bottles():
-    conn = sqlite3.connect(DB_NAME)
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM bottle_returns")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+# --- QR Detection Logic ---
+def scan_qr_from_frame(frame):
+    qr_detector = cv2.QRCodeDetector()
+    data, bbox, _ = qr_detector.detectAndDecode(frame)
 
-def scan_qr_code():
-    st.info("📷 Scanning QR code… Press Q to cancel")
-    cap = cv2.VideoCapture(0)
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        decoded = decode(frame)
-        if decoded:
-            cap.release()
-            cv2.destroyAllWindows()
-            return decoded[0].data.decode("utf-8")
-        cv2.imshow("Scan QR (Q to quit)", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    cap.release()
-    cv2.destroyAllWindows()
-    return None
+    if bbox is not None:
+        for i in range(len(bbox)):
+            pt1 = tuple(map(int, bbox[i][0]))
+            pt2 = tuple(map(int, bbox[(i + 1) % len(bbox)][0]))
+            cv2.line(frame, pt1, pt2, color=(0, 255, 0), thickness=2)
 
-st.set_page_config(page_title="SmartPfand QR", layout="centered")
-st.title("♻️ SmartPfand – QR Code Bottle Return System")
-init_db()
-
-mode = st.radio("Choose action", ["Deposit Bottle", "Return Bottle", "View Bottles"])
-
-if mode != "View Bottles":
-    use_qr = st.checkbox("Use QR scanner")
-    bottle_id = None
-    if use_qr and st.button("Scan QR"):
-        bottle_id = scan_qr_code()
-        if bottle_id:
-            st.success(f"Scanned: {bottle_id}")
-        else:
-            st.warning("No QR code found.")
+    if data:
+        message = add_return(data)
     else:
-        bottle_id = st.text_input("Enter bottle ID")
+        message = "No QR Code detected"
 
-    if st.button("Submit"):
-        if not bottle_id:
-            st.error("Enter or scan a bottle ID.")
-        elif mode == "Deposit Bottle":
-            st.success("Deposited!") if add_bottle(bottle_id) else st.warning("Already exists.")
-        else:
-            receipt = return_bottle(bottle_id)
-            if receipt:
-                st.success("Returned!")
-                st.code(f"Receipt\n-------\nBottle ID: {receipt['bottle_id']}\nReturned At: {receipt['timestamp']}\nAmount: {receipt['amount']}")
-            else:
-                st.error("Bottle not found or already returned.")
-else:
-    st.subheader("Bottles in system")
-    all_bottles = get_all_bottles()
-    if all_bottles:
-        for row in all_bottles:
-            st.write(f"• {row[1]} at {row[2]}")
-    else:
-        st.info("No bottles logged yet.")
+    return frame, message
+
+# --- Gradio Interface ---
+def gradio_process(image):
+    if image is None:
+        return None, "No frame received"
+    frame = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    result_frame, message = scan_qr_from_frame(frame)
+    result_frame = cv2.cvtColor(result_frame, cv2.COLOR_BGR2RGB)
+    return result_frame, message
+
+create_db()
+
+demo = gr.Interface(
+    fn=gradio_process,
+    inputs=gr.Image(source="webcam", streaming=True),
+    outputs=[gr.Image(label="Scanned Frame"), gr.Textbox(label="Result")],
+    title="Vimoksha - Bottle Recycling QR Scanner",
+    description="Scan a QR code on a bottle to receive ₹10."
+)
+
+if __name__ == "__main__":
+    demo.launch()
+
+
+  
+         
